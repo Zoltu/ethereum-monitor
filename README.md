@@ -1,5 +1,10 @@
 Gather block/transaction statistics and pipe them to InfluxDB for query and (optionally) graphing (via Grafana).
 
+## Run
+```
+docker-compose up
+```
+
 ## Fancy Grafana Charts
 ![image](https://user-images.githubusercontent.com/886059/47424648-b2e45f00-d7ba-11e8-8207-0a8e2912f3fb.png)
 ```sql
