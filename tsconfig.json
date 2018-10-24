@@ -1,0 +1,10 @@
+{
+	"compilerOptions": {
+		"target": "es2018",
+		"module": "commonjs",
+		"lib": [ "es2015", "es2016", "es2017", "es2018" ],
+		"strict": true,
+		"noEmit": true,
+	},
+	"include": [ "source", "tests" ]
+}

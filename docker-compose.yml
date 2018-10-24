@@ -1,0 +1,65 @@
+version: '3.6'
+services:
+
+  influxdb:
+    image: 'influxdb:1.6.1-alpine'
+    networks:
+      - 'internal'
+    volumes:
+      - type: 'volume'
+        source: 'ethereum-monitor-influxdb'
+        target: '/var/lib/influxdb'
+
+  influxdb-config:
+    command: '/init-influxdb.sh'
+    environment:
+      INFLUXDB_ADMIN_USER: 'root'
+      INFLUXDB_ADMIN_PASSWORD: 'root'
+    image: 'influxdb:1.6.1-alpine'
+    networks:
+      - 'internal'
+    volumes:
+      - type: 'volume'
+        source: 'ethereum-monitor-influxdb'
+        target: '/var/lib/influxdb'
+
+  grafana:
+    image: 'grafana/grafana:5.2.3'
+    networks:
+      - 'internal'
+      - 'external'
+    ports:
+      - target: '3000'
+        published: '3000'
+        protocol: 'tcp'
+    volumes:
+      - type: 'volume'
+        source: 'ethereum-monitor-grafana'
+        target: '/var/lib/grafana'
+
+  ethereum-monitor:
+    build: '.'
+    environment:
+      ETHEREUM_URI: 'https://parity.zoltu.io'
+      INFLUX_HOST: 'influxdb'
+      INFLUX_DATABASE_NAME: 'Ethereum'
+      INFLUX_USER: 'root'
+      INFLUX_PASS: 'root'
+    networks:
+      - 'internal'
+      - 'external'
+    # uncomment to allow for attaching a NodeJS debugger to the running script
+    # ports:
+    #   - target: '9229'
+    #     published: '9229'
+    #     protocol: 'tcp'
+
+networks:
+  internal:
+    internal: true
+  external:
+    internal: false
+
+volumes:
+  ethereum-monitor-influxdb:
+  ethereum-monitor-grafana:
