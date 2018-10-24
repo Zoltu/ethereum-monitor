@@ -39,6 +39,7 @@ services:
 
   ethereum-monitor:
     build: '.'
+    image: 'zoltu/ethereum-monitor'
     environment:
       ETHEREUM_URI: 'https://parity.zoltu.io'
       INFLUX_HOST: 'influxdb'
