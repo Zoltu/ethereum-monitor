@@ -7,6 +7,11 @@ import { JsonRpcProvider } from 'ethers/providers'
 import { InfluxDB, FieldType, IPoint } from 'influx/lib/src'
 import { BlockAndLogStreamer } from 'ethereumjs-blockstream'
 
+interface MakerData {
+	feedPrice: number
+	feedPriceChange: number
+}
+
 export interface DataFaucetConfiguration {
 	ethereumEndpoint: string
 	influxHost: string
@@ -20,10 +25,7 @@ export interface DataFaucetConfiguration {
 
 export class DataFaucet {
 	// TODO: drop ethers.js, just use `fetch` instead for simpler debugging since we don't need all of ethers.js features.
-	private readonly provider: JsonRpcProvider
-	private readonly influxdb: InfluxDB
 	private timer: NodeJS.Timer | null = null
-	private blockStreamer: BlockAndLogStreamer<RawBlock, RawLog>
 	private currentProcessor: Promise<void>
 
 	static async create(configuration: DataFaucetConfiguration): Promise<DataFaucet> {
@@ -73,6 +75,15 @@ export class DataFaucet {
 						contract_address: FieldType.STRING,
 						log_count: FieldType.INTEGER,
 					}
+				}, {
+					measurement: 'maker',
+					fields: {
+						block_hash: FieldType.STRING,
+						block_number: FieldType.INTEGER,
+						feed_price: FieldType.FLOAT,
+						feed_price_change: FieldType.FLOAT,
+					},
+					tags: [],
 				}
 			]
 		})
@@ -94,10 +105,11 @@ export class DataFaucet {
 		return new DataFaucet(provider, influxdb, blockStreamer)
 	}
 
-	private constructor(provider: JsonRpcProvider, influxdb: InfluxDB, blockStreamer: BlockAndLogStreamer<RawBlock, RawLog>) {
-		this.provider = provider
-		this.influxdb = influxdb
-		this.blockStreamer = blockStreamer
+	private constructor(
+		private readonly provider: JsonRpcProvider,
+		private readonly influxdb: InfluxDB,
+		private readonly blockStreamer: BlockAndLogStreamer<RawBlock, RawLog>
+	) {
 		this.currentProcessor = Promise.resolve()
 		this.blockStreamer.subscribeToOnBlockAdded(block => this.currentProcessor = this.currentProcessor.then(() => this.processBlock(block)))
 		this.blockStreamer.subscribeToOnBlockRemoved(block => this.currentProcessor = this.currentProcessor.then(() => this.purgeBlock(block)))
@@ -106,7 +118,7 @@ export class DataFaucet {
 		process.on('SIGTERM', () => { if (this.timer) clearTimeout(this.timer) })
 	}
 
-	private maybeFetchBlock = async () => {
+	private readonly maybeFetchBlock = async () => {
 		try {
 			const previousBlock = parseBlock(this.blockStreamer.getLatestReconciledBlock()!)
 			const latestBlockNumber = await this.getBlockNumber()
@@ -127,7 +139,7 @@ export class DataFaucet {
 		}
 	}
 
-	private getBlockNumber = async (): Promise<number> => {
+	private readonly getBlockNumber = async (): Promise<number> => {
 		while (true) {
 			try {
 				return await this.provider.getBlockNumber()
@@ -137,18 +149,21 @@ export class DataFaucet {
 		}
 	}
 
-	private processBlock = async (rawBlock: RawBlock): Promise<void> => {
+	private readonly processBlock = async (rawBlock: RawBlock): Promise<void> => {
 		try {
 			const block = parseBlock(rawBlock)
 			console.log(`fetching previous block ${block.parentHash} (${block.number - 1})`)
 			const previousBlockTimestamp = await this.fetchBlockTimestamp(block.parentHash)
 			console.log(`fetching receipts for block ${block.hash} (${block.number})`)
 			const receipts = await this.fetchReceipts(block)
+			console.log(`fetching maker price feed for block ${block.hash} (${block.number})`)
+			const makerData = await this.fetchMakerData(block)
 			// console.log(`fetching parity traces for block ${block.hash} (${block.number})`)
 			// const parityTraces = await this.fetchParityTraces(block)
 			console.log(`submitting measurements for block ${block.hash} (${block.number})`)
 			const measurements = this.generateTransactionMeasurements(block, receipts)
 				.concat(this.generateBlockMeasurement(previousBlockTimestamp, block))
+				.concat(this.generateMakerMeasurements(block, makerData))
 			await this.influxdb.writePoints(measurements, { precision: 's' })
 			console.log(`done processing block ${block.hash} (${block.number})`)
 		} catch (error) {
@@ -156,7 +171,7 @@ export class DataFaucet {
 		}
 	}
 
-	private purgeBlock = async (rawBlock: RawBlock): Promise<void> => {
+	private readonly purgeBlock = async (rawBlock: RawBlock): Promise<void> => {
 		try {
 			const block = parseBlock(rawBlock)
 			console.log(`purging block ${rawBlock.hash} (${rawBlock.number})`)
@@ -167,23 +182,36 @@ export class DataFaucet {
 		}
 	}
 
-	private fetchBlockTimestamp = async (blockHash: Hash): Promise<Date> => {
+	private readonly fetchBlockTimestamp = async (blockHash: Hash): Promise<Date> => {
 		const rawBlock = await this.provider.send('eth_getBlockByHash', [blockHash.to0xString(), false])
 		return new Date(parseInt(rawBlock.timestamp, 16) * 1000)
 	}
 
-	private fetchLatestBlock = async (): Promise<RawBlock> => {
+	private readonly fetchLatestBlock = async (): Promise<RawBlock> => {
 		return await this.provider.send('eth_getBlockByNumber', ['latest', true])
 	}
 
-	private fetchReceipts = async (block: Block): Promise<Array<Receipt>> => {
+	private readonly fetchReceipts = async (block: Block): Promise<Array<Receipt>> => {
 		const transactionReceiptRequests = block.transactions.map(this.fetchReceipt)
 		return await Promise.all(transactionReceiptRequests)
 	}
 
-	private fetchReceipt = async (transaction: Transaction): Promise<Receipt> => {
+	private readonly fetchReceipt = async (transaction: Transaction): Promise<Receipt> => {
 		const rawReceipt = await this.provider.send('eth_getTransactionReceipt', [ transaction.hash.to0xString() ])
 		return parseReceipt(rawReceipt)
+	}
+
+	private readonly fetchMakerData = async (block: Block): Promise<MakerData> => {
+		// `read()` signature hash
+		const data = `0x57de26a4`
+		const newBlockResultString = await this.provider.send('eth_call', [{ to: '0x729d19f657bd0614b4985cf1d82531c67569197b', data: data }, `0x${block.number.toString(16)}`])
+		const previousBlockResultString = await this.provider.send('eth_call', [{ to: '0x729d19f657bd0614b4985cf1d82531c67569197b', data: data }, `0x${(block.number - 1).toString(16)}`])
+		const newBlockFeedPrice = Number.parseInt(newBlockResultString, 16) / 10**18
+		const previousBlockFeedPrice = Number.parseInt(previousBlockResultString, 16) / 10**18
+		return {
+			feedPrice: newBlockFeedPrice,
+			feedPriceChange: newBlockFeedPrice - previousBlockFeedPrice,
+		}
 	}
 
 	// private fetchParityTraces = async (block: Block): Promise<Array<ParityTrace>> => {
@@ -191,7 +219,7 @@ export class DataFaucet {
 	// 	return await Promise.all(parityTraceRequests)
 	// }
 
-	private generateBlockMeasurement = (previousBlockTimestamp: Date, block: Block): IPoint => {
+	private readonly generateBlockMeasurement = (previousBlockTimestamp: Date, block: Block): IPoint => {
 		return {
 			measurement: 'block',
 			timestamp: block.timestamp,
@@ -212,7 +240,7 @@ export class DataFaucet {
 		}
 	}
 
-	private generateTransactionMeasurements = (block: Block, receipts: Array<Receipt>): Array<IPoint> => {
+	private readonly generateTransactionMeasurements = (block: Block, receipts: Array<Receipt>): Array<IPoint> => {
 		const transactions = block.transactions.reduce((map, transaction) => map.set(transaction.hash.toString(), transaction), new Map<string, Transaction>())
 
 		const measurements: Array<IPoint> = []
@@ -223,7 +251,7 @@ export class DataFaucet {
 		return measurements
 	}
 
-	private generateTransactionMeasurement = (block: Block, transaction: Transaction, receipt: Receipt): IPoint => {
+	private readonly generateTransactionMeasurement = (block: Block, transaction: Transaction, receipt: Receipt): IPoint => {
 		return {
 			measurement: 'transaction',
 			timestamp: block.timestamp,
@@ -247,6 +275,21 @@ export class DataFaucet {
 				eth: transaction.value / 1e18,
 				contract_address: (receipt.contractAddress !== null) ? receipt.contractAddress.toString() : null,
 				log_count: receipt.logs.length,
+			}
+		}
+	}
+
+	private readonly generateMakerMeasurements = (block: Block, makerData: MakerData): IPoint => {
+		return {
+			measurement: 'maker',
+			timestamp: block.timestamp,
+			tags: {
+			},
+			fields: {
+				block_hash: block.hash,
+				block_number: block.number,
+				feed_price: makerData.feedPrice,
+				feed_price_change: makerData.feedPriceChange,
 			}
 		}
 	}
